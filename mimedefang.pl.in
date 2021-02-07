@@ -75,6 +75,9 @@ use Sys::Hostname;
 use File::Spec qw ();
 use Errno qw(ENOENT EACCES);
 
+use MD::Context;
+use MD::Utils;
+
 # Detect these Perl modules at run-time.  Can explicitly prevent
 # loading of these modules by setting $Features{"xxx"} = 0;
 #
@@ -187,27 +190,7 @@ $TrophieSock = '@SPOOLDIR@/trophie';
 #***********************************************************************
 sub expand_ipv6_address
 {
-    my ($addr) = @_;
-
-    return '0000:0000:0000:0000:0000:0000:0000:0000' if ($addr eq '::');
-    if ($addr =~ /::/) {
-	# Do nothing if more than one pair of colons
-	return $addr if ($addr =~ /::.*::/);
-
-	# Make sure we don't begin or end with ::
-	$addr = "0000$addr" if $addr =~ /^::/;
-	$addr .= '0000' if $addr =~ /::$/;
-
-	# Count number of colons
-	my $colons = ($addr =~ tr/:/:/);
-	if ($colons < 8) {
-	    my $missing = ':' . ('0000:' x (8 - $colons));
-	    $addr =~ s/::/$missing/;
-	}
-    }
-
-    # Pad short fields
-    return join(':', map { (length($_) < 4 ? ('0' x (4-length($_)) . $_) : $_) } (split(/:/, $addr)));
+    return MD::Utils::expand_ipv6_address(@_);
 }
 
 #***********************************************************************
@@ -219,14 +202,7 @@ sub expand_ipv6_address
 #***********************************************************************
 sub reverse_ip_address_for_rbl
 {
-    my ($addr) = @_;
-    if ($addr =~ /:/) {
-	$addr = expand_ipv6_address($addr);
-	$addr =~ s/://g;
-	return join('.', reverse(split(//, $addr)));
-    }
-
-    return join('.', reverse(split(/\./, $addr)));
+    return MD::Utils::reverse_ip_address_for_rbl(@_);
 }
 
 
@@ -239,10 +215,8 @@ sub reverse_ip_address_for_rbl
 #  we're in filter_relay, filter_sender or filter_recipient
 #***********************************************************************
 sub in_message_context {
-    my($name) = @_;
-    return 1 if ($InMessageContext);
-    md_syslog('warning', "$name called outside of message context");
-    return 0;
+    my ($name) = @_;
+    return MD::Context::in_message_context($name, $InMessageContext);
 }
 
 #***********************************************************************
@@ -253,12 +227,8 @@ sub in_message_context {
 #  1 if we are not in filter wrapup; 0 otherwise.
 #***********************************************************************
 sub in_filter_wrapup {
-    my($name) = @_;
-    if ($InFilterWrapUp) {
-	    md_syslog('warning', "$name called inside filter_wrapup context");
-	    return 1;
-    }
-    return 0;
+    my ($name) = @_;
+    return MD::Context::in_filter_wrapup($name, $InFilterWrapUp);
 }
 
 #***********************************************************************
@@ -269,10 +239,8 @@ sub in_filter_wrapup {
 #  1 if we are inside filter or filter_multipart, 0 otherwise.
 #***********************************************************************
 sub in_filter_context {
-    my($name) = @_;
-    return 1 if ($InFilterContext);
-    md_syslog('warning', "$name called outside of filter context");
-    return 0;
+    my ($name) = @_;
+    return MD::Context::in_filter_context($name, $InFilterContext);
 }
 
 #***********************************************************************
@@ -283,10 +251,8 @@ sub in_filter_context {
 #  1 if we are inside filter_end 0 otherwise.
 #***********************************************************************
 sub in_filter_end {
-    my($name) = @_;
-    return 1 if ($InFilterEnd);
-    md_syslog('warning', "$name called outside of filter_end");
-    return 0;
+    my ($name) = @_;
+    return MD::Context::in_filter_end($name, $InFilterEnd);
 }
 
 #***********************************************************************
@@ -376,10 +342,7 @@ sub md_copy_orig_msg_to_work_dir_as_mbox_file {
 #  "foo\r\nbar\tbl%t" ==> "foo%0D%0Abar%09bl%25t"
 #***********************************************************************
 sub percent_encode {
-    my($str) = @_;
-    $str =~ s/([^\x21-\x7e]|[%\\'"])/sprintf("%%%02X", unpack("C", $1))/ge;
-    #" Fix emacs highlighting...
-    return $str;
+    return MD::Utils::percent_encode(@_);
 }
 
 #***********************************************************************
@@ -394,10 +357,7 @@ sub percent_encode {
 # quotes or spaces, but we do encode commas.
 #***********************************************************************
 sub percent_encode_for_graphdefang {
-    my($str) = @_;
-    $str =~ s/([^\x20-\x7e]|[%\\,])/sprintf("%%%02X", unpack("C", $1))/ge;
-    #" Fix emacs highlighting...
-    return $str;
+    return MD::Utils::percent_encode_for_graphdefang(@_);
 }
 
 #***********************************************************************
@@ -492,9 +452,7 @@ sub init_status_tag
 #  "foo%0D%0Abar%09bl%25t" ==> "foo\r\nbar\tbl%t"
 #***********************************************************************
 sub percent_decode {
-    my($str) = @_;
-    $str =~ s/%([0-9A-Fa-f]{2})/pack("C", hex($1))/ge;
-    return $str;
+    return MD::Utils::percent_decode(@_);
 }
 
 my $results_fh;
@@ -556,16 +514,20 @@ sub write_result_line
 #  Returns a string representing the current time.
 #***********************************************************************
 sub time_str {
-    my($sec, $min, $hour, $mday, $mon, $year, $junk);
-    ($sec, $min, $hour, $mday, $mon, $year, $junk) = localtime(time());
-    return sprintf("%04d-%02d-%02d-%02d.%02d.%02d",
-		   $year + 1900, $mon+1, $mday, $hour, $min, $sec);
+    return MD::Utils::time_str;
 }
 
+#***********************************************************************
+# %PROCEDURE: hour_str
+# %ARGUMENTS:
+#  None
+# %RETURNS:
+#  The current time in the form: "YYYY-MM-DD-HH"
+# %DESCRIPTION:
+#  Returns a string representing the current time.
+#***********************************************************************
 sub hour_str {
-    my($sec, $min, $hour, $mday, $mon, $year, $junk);
-    ($sec, $min, $hour, $mday, $mon, $year, $junk) = localtime(time());
-    return sprintf('%04d-%02d-%02d-%02d', $year+1900, $mon+1, $mday, $hour);
+    return MD::Utils::hour_str;
 }
 
 {
@@ -590,22 +552,7 @@ sub hour_str {
 	{
 		my ($tag, $facility) = @_;
 
-		if( ! defined $_openlogsub ) {
-			# Try Unix::Syslog first, then Sys::Syslog
-			eval qq{use Unix::Syslog qw( :macros ); };
-			if(!$@) {
-				($_openlogsub, $_syslogsub) = _wrap_for_unix_syslog();
-			} else {
-				eval qq{use Sys::Syslog ();};
-				if(!$@) {
-					($_openlogsub, $_syslogsub) = _wrap_for_sys_syslog();
-				} else {
-					die q{Unable to detect either Unix::Syslog or Sys::Syslog};
-				}
-			}
-		}
-
-		return $_openlogsub->($tag, 'pid,ndelay', $facility);
+    return MD::Syslog::md_openlog(@_);
 	}
 
 	#***********************************************************************
@@ -622,91 +569,7 @@ sub hour_str {
 	{
 		my ($facility, $msg) = @_;
 
-		if(!$_syslogsub) {
-			md_openlog('mimedefang.pl', $SyslogFacility);
-		}
-
-		if (defined $MsgID && $MsgID ne 'NOQUEUE') {
-			return $_syslogsub->($facility, '%s', $MsgID . ': ' . $msg);
-		} else {
-			return $_syslogsub->($facility, '%s', $msg);
-		}
-	}
-
-	sub _wrap_for_unix_syslog
-	{
-
-		my $openlog = sub {
-			my ($id, $flags, $facility) = @_;
-
-			die q{first argument must be an identifier string} unless defined $id;
-			die q{second argument must be flag string} unless defined $flags;
-			die q{third argument must be a facility string} unless defined $facility;
-
-			return Unix::Syslog::openlog( $id, _convert_flags( $flags ), _convert_facility( $facility ) );
-		};
-
-		my $syslog = sub {
-			my $facility = shift;
-			return Unix::Syslog::syslog( _convert_facility( $facility ), @_);
-		};
-
-		return ($openlog, $syslog);
-	}
-
-	sub _wrap_for_sys_syslog
-	{
-
-		my $openlog  = sub {
-			# Debian Stretch version is 0.33_01...dammit!
-			my $ver = $Sys::Syslog::VERSION;
-			$ver =~ s/_.*//;
-			if( $ver < 0.16 ) {
-				# Older Sys::Syslog versions still need
-				# setlogsock().  RHEL5 still ships with 0.13 :(
-				Sys::Syslog::setlogsock([ 'unix', 'tcp', 'udp' ]);
-			}
-			return Sys::Syslog::openlog(@_);
-		};
-		my $syslog   = sub {
-			return Sys::Syslog::syslog(@_);
-		};
-
-		return ($openlog, $syslog);
-	}
-
-	sub _convert_flags
-	{
-		my($flags) = @_;
-
-		my $flag_map = {
-			pid     => Unix::Syslog::LOG_PID(),
-			ndelay  => Unix::Syslog::LOG_NDELAY(),
-		};
-
-		my $num = 0;
-		foreach my $thing (split(/,/, $flags)) {
-			next unless exists $flag_map->{$thing};
-			$num |= $flag_map->{$thing};
-		}
-		return $num;
-	}
-
-
-	sub _convert_facility
-	{
-		my($facility) = @_;
-
-		my $num = 0;
-		foreach my $thing (split(/\|/, $facility)) {
-			if (!defined($_fac_map) ||
-			    !exists($_fac_map->{$thing})) {
-				$_fac_map->{$thing} = _fac_to_num($thing);
-			}
-			next unless defined $_fac_map->{$thing};
-			$num |= $_fac_map->{$thing};
-		}
-		return $num;
+    return MD::Syslog::md_syslog(@_);
 	}
 
 	my %special = (
@@ -7680,7 +7543,7 @@ sub md_check_against_smtp_server {
          $sock->print("RSET\r\n");
          $sock->flush();
          # Swallow return value
-         get_smtp_return_code($sock, $recip, $server); 
+         get_smtp_return_code($sock, $recip, $server);
          $sock->print("EHLO $helo\r\n");
       }
   }
