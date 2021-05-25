@@ -63,6 +63,7 @@ use vars qw($HTMLFoundEndBody $HTMLBoilerplate $SASpamTester);
 
 use Socket;
 use IO::Socket;
+use IO::Socket::SSL;
 use IO::Select;
 use IO::Handle;
 use IO::File;
@@ -624,20 +625,25 @@ sub synthesize_received_header {
     my($hdr);
 
     my($hn) = $SendmailMacros{"if_name"};
+    my($auth) = $SendmailMacros{"auth_authen"};
 
     my $strdate = rfc2822_date();
 
     $hn = get_host_name() unless (defined($hn) and ($hn ne ""));
     if ($RealRelayHostname ne "[$RealRelayAddr]") {
-	$hdr = "Received: from $Helo ($RealRelayHostname [$RealRelayAddr])\n";
+      $hdr = "Received: from $Helo ($RealRelayHostname [$RealRelayAddr])\n";
     } else {
-	$hdr = "Received: from $Helo ([$RealRelayAddr])\n";
+      $hdr = "Received: from $Helo ([$RealRelayAddr])\n";
     }
-    $hdr .= "\tby $hn (envelope-sender $Sender) (MIMEDefang) with ESMTP id $MsgID";
-    if ($#Recipients != 0) {
-	$hdr .= "; ";
+    if($auth) {
+      $hdr .= "\tby $hn (envelope-sender $Sender) (MIMEDefang) with ESMTPA id $MsgID";
     } else {
-	$hdr .= "\n\tfor " . $Recipients[0] . "; ";
+      $hdr .= "\tby $hn (envelope-sender $Sender) (MIMEDefang) with ESMTP id $MsgID";
+    }
+    if ($#Recipients != 0) {
+      $hdr .= "; ";
+    } else {
+      $hdr .= "\n\tfor " . $Recipients[0] . "; ";
     }
 
     $hdr .= $strdate . "\n";
@@ -5701,17 +5707,20 @@ sub handle_tick
 #***********************************************************************
 sub handle_relayok
 {
-	my ($hostip, $hostname, $port, $myip, $myport) = @_;
-	if(!defined(&filter_relay)) {
-		send_filter_answer('CONTINUE', "ok", "filter_relay", "host $hostip ($hostname)");
-		return;
-	}
+        my ($hostip, $hostname, $port, $myip, $myport, $qid) = @_;
 
-	# Set up globals
-	$RelayAddr     = $hostip;
-	$RelayHostname = $hostname;
-	my ($ok, $msg, $code, $dsn, $delay) = filter_relay($hostip, $hostname, $port, $myip, $myport);
-	send_filter_answer($ok, $msg, "filter_relay", "host $hostip ($hostname)", $code, $dsn, $delay);
+        if(!defined(&filter_relay)) {
+            send_filter_answer('CONTINUE', "ok", "filter_relay", "host $hostip ($hostname)");
+            return;
+        }
+
+        # Set up globals
+        $RelayAddr     = $hostip;
+        $RelayHostname = $hostname;
+        $QueueID       = $qid;
+        $MsgID         = $qid;
+        my ($ok, $msg, $code, $dsn, $delay) = filter_relay($hostip, $hostname, $port, $myip, $myport, $qid);
+        send_filter_answer($ok, $msg, "filter_relay", "host $hostip ($hostname)", $code, $dsn, $delay);
 }
 
 #***********************************************************************
@@ -5729,7 +5738,7 @@ sub handle_relayok
 #***********************************************************************
 sub handle_helook
 {
-	my ($ip, $name, $helo, $port, $myip, $myport) = @_;
+	my ($ip, $name, $helo, $port, $myip, $myport, $qid) = @_;
 	if(!defined(&filter_helo)) {
 		send_filter_answer('CONTINUE', "ok", "filter_helo", "helo $helo");
 		return;
@@ -5739,8 +5748,9 @@ sub handle_helook
 	$RelayAddr     = $ip;
 	$RelayHostname = $name;
 	$Helo          = $helo;
-
-	my ($ok, $msg, $code, $dsn, $delay) = filter_helo($ip, $name, $helo, $port, $myip, $myport);
+        $QueueID       = $qid;
+        $MsgID         = $qid;
+	my ($ok, $msg, $code, $dsn, $delay) = filter_helo($ip, $name, $helo, $port, $myip, $myport, $qid);
 	send_filter_answer($ok, $msg, "filter_helo", "helo $helo", $code, $dsn, $delay);
 }
 
@@ -7420,13 +7430,14 @@ sub get_smtp_extensions {
       $delim=$2;
       $ext=$3;
       $text=$4;
-      md_syslog('debug',"get_smtp_extensions: line $LineNum: code=$code, delim=$delim, ext=$ext, text=$text");
+      # uncomment to debug parsing
+      # md_syslog('debug',"get_smtp_extensions: line $LineNum: code=$code, delim=$delim, ext=$ext, text=$text");
       if ( $LineNum == 0 ) {
         $exts{'hostname'} = $3;
         $LineNum++;
         next;
       }
-      @exts{$ext} = $text;
+      $exts{$ext} = $text;
       $LineNum++;
     }
 
@@ -7467,7 +7478,13 @@ sub md_check_against_smtp_server {
       $recip = "<$recip>";
     }
 
-    my $sock = IO::Socket::INET->new(PeerAddr => $server,
+    # Set SSL_startHandshake to start in plain mode,
+    # SSL_verify_mode to SSL_VERIFY_NONE to make the check work
+    # with self-signed certificates and SSL_hostname for SNI
+    my $sock = IO::Socket::SSL->new(PeerAddr => $server,
+             SSL_startHandshake => 0,
+             SSL_verify_mode => SSL_VERIFY_NONE,
+             SSL_hostname => "$server",
 				     PeerPort => $port,
 				     Proto    => 'tcp',
 				     Timeout  => 25);
@@ -7506,13 +7523,14 @@ sub md_check_against_smtp_server {
     $sock->flush();
     my %exts;
     my $ext;
-    ($retval, $code, $dsn, %exts) = get_smtp_extensions($sock, $recip, $server);
-    if ($retval ne 'CONTINUE') {
-      $sock->print("HELO $helo\r\n");
+     ($retval, $code, $dsn, %exts) = get_smtp_extensions($sock, $recip, $server);
+     if ($retval ne 'CONTINUE') {
+       $sock->print("HELO $helo\r\n");
     } else {
-      foreach $ext ( keys %exts ) {
-        md_syslog('debug',"md_check_against_smtp_server extension: $ext $exts{$ext}");
-      }
+    # Uncomment to debug (and/or uncomment similar line in get_smtp_extensions)
+    #   foreach $ext ( keys %exts ) {
+    #     md_syslog('debug',"md_check_against_smtp_server extension: $ext $exts{$ext}");
+    #   }
       if (exists $exts{'STARTTLS'}) {
         # send STARTTLS command and read response
         $sock->print("STARTTLS\r\n");
@@ -7526,18 +7544,17 @@ sub md_check_against_smtp_server {
           return ($retval, $text, $code, $dsn);
         }
         # if response was successful we can upgrade the socket to SSL now:
-        if ( IO::Socket::SSL->start_SSL($sock,
-          # explicitly set hostname we should use for SNI
-          SSL_hostname => "$server" ) ) {
+        if ( $sock->connect_SSL ) {
           md_syslog('debug',"md_check_against_smtp_server: start_SSL succeeded!");
           # send inside EHLO
           $sock->print("EHLO $helo\r\n");
-          } else {
+        } else {
           #back off from using STARTTLS
+          $sock->stop_SSL;
           no warnings 'once';
           md_syslog('debug',"md_check_against_smtp_server: $server offers STARTTLS but fails with error $IO::Socket::SSL::SSL_ERROR. Falling back to plaintext...");
           $sock->print("EHLO $helo\r\n");
-         }
+        }
       } else {
          md_syslog('debug',"md_check_against_smtp_server: STARTTLS not available");
          $sock->print("RSET\r\n");
